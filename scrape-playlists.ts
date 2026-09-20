@@ -1,13 +1,18 @@
 // scrape-playlists.ts — roda no GitHub Actions (Deno)
 // Raspa as playlists oficiais (Spotify / Apple Music / Deezer) do site de origem
-// e grava tudo em UM arquivo: playlists.json
+// e grava tudo em UM arquivo CRIPTOGRAFADO (AES-256-GCM): playlists.enc
 //
-// Uso: SITE_URL=https://... deno run --allow-net --allow-write --allow-env=SITE_URL scrape-playlists.ts
+// Uso: SITE_URL=https://... PLAYLISTS_KEY=<base64 de 32 bytes> \
+//      deno run --allow-net --allow-write --allow-env=SITE_URL,PLAYLISTS_KEY scrape-playlists.ts
+
+import { encrypt } from "./crypto.ts";
 
 // URL do site vem do secret SITE_URL (Settings > Secrets and variables > Actions),
 // assim ela não fica escrita no código do repositório público.
 const BASE = (globalThis.Deno?.env.get("SITE_URL") ?? "").trim().replace(/\/+$/, "");
-const OUT_FILE = "playlists.json";
+// Chave de criptografia (secret PLAYLISTS_KEY). A MESMA chave precisa estar no Cloudflare.
+const KEY = (globalThis.Deno?.env.get("PLAYLISTS_KEY") ?? "").trim();
+const OUT_FILE = "playlists.enc";
 const CONCURRENCY = 2; // quantas playlists baixar ao mesmo tempo (5 dava 500 em rajada)
 const PAUSE_MS = 250; // pausa depois de cada playlist, pra não sobrecarregar o site
 
@@ -164,6 +169,10 @@ async function main() {
     console.error("❌ Secret SITE_URL ausente ou inválido (precisa começar com https://)");
     Deno.exit(1);
   }
+  if (!KEY) {
+    console.error("❌ Secret PLAYLISTS_KEY ausente (gere com: openssl rand -base64 32)");
+    Deno.exit(1);
+  }
   console.log("📥 baixando lista de playlists...");
   const home = await fetchText(`${BASE}/fmusic`);
   const list = parsePlaylistList(home);
@@ -210,8 +219,10 @@ async function main() {
     playlists: ok,
   };
 
-  await Deno.writeTextFile(OUT_FILE, JSON.stringify(data));
-  console.log(`✅ ${OUT_FILE} gravado: ${ok.length} playlists, ${failed.length} falharam`);
+  // Criptografa antes de gravar: o repositório é público, então o arquivo
+  // só é legível por quem tem a PLAYLISTS_KEY (GitHub secret + Cloudflare secret).
+  await Deno.writeTextFile(OUT_FILE, await encrypt(JSON.stringify(data), KEY));
+  console.log(`✅ ${OUT_FILE} gravado (criptografado): ${ok.length} playlists, ${failed.length} falharam`);
 }
 
 if (import.meta.main) {
