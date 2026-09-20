@@ -1,0 +1,41 @@
+name: Render Card
+
+on:
+  workflow_dispatch:
+    inputs:
+      chat_id:
+        description: "Chat ID do Telegram"
+        required: true
+      caption:
+        description: "Legenda da foto"
+        required: false
+      data_b64:
+        description: "Dados do artista em base64 (JSON UTF-8)"
+        required: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Cache das dependências do Deno
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/deno
+          key: deno-${{ runner.os }}-${{ hashFiles('render.ts') }}
+
+      - name: Renderizar e enviar
+        env:
+          CHAT_ID: ${{ github.event.inputs.chat_id }}
+          CAPTION: ${{ github.event.inputs.caption }}
+          DATA_B64: ${{ github.event.inputs.data_b64 }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        run: deno run --allow-net --allow-env render.ts
