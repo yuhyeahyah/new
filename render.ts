@@ -1073,6 +1073,22 @@ const BRAND = palette.brand;
 const CARD_BG = palette.cardBg;
 const CARD_BORDER = palette.cardBorder;
 
+// Cor de texto adaptativa: em fundo claro (ex.: amarelo pastel escurecido
+// só um pouco), texto branco perde contraste — usa quase-preto. Em fundo
+// escuro (o caso mais comum), mantém branco como sempre foi.
+const bgRgb = hexToRgb(dominantColor); // aproximação: BG é uma versão escalada da mesma cor, luminância segue igual
+const bgLuminance = (0.299 * bgRgb.r + 0.587 * bgRgb.g + 0.114 * bgRgb.b) / 255;
+const isLightBg = bgLuminance > 0.6;
+
+const TEXT_RGB = isLightBg ? "20, 18, 8" : "255, 255, 255"; // quase-preto vs branco
+const TEXT = `rgb(${TEXT_RGB})`;
+// "Preto suave" pra usar em pills/overlays que hoje são pretos fixos
+// (mantém esses como estão — pretos translúcidos continuam legíveis tanto
+// em fundo claro quanto escuro, então não precisam adaptar).
+function textRgba(alpha: number): string {
+  return `rgba(${TEXT_RGB}, ${alpha})`;
+}
+
 // -----------------------------------------------------------------
 // Layout (Satori)
 // -----------------------------------------------------------------
@@ -1091,25 +1107,28 @@ function buildMarkup(): N {
       position: "absolute", top: "0px", left: "0px", width: `${W}px`, height: "250px",
       background: `linear-gradient(to bottom, rgba(18,10,46,0.10) 0%, rgba(18,10,46,0.55) 55%, ${BG} 100%)`,
     }),
-    // Marca
+    // Marca (sempre sobre o banner escurecido, então texto branco fixo
+    // independe da cor de fundo do resto do card)
     el(
       {
         position: "absolute", top: "28px", left: "40px", padding: "8px 18px", borderRadius: "30px",
         background: "rgba(0,0,0,0.35)", fontSize: "16px", fontWeight: 900, letterSpacing: "3px",
+        color: "white",
       },
       "FAMOU$",
     ),
-    // Ranking mundial
+    // Ranking mundial (idem: sempre sobre o banner escurecido)
     worldRank
       ? el(
         {
           position: "absolute", top: "28px", right: "40px", padding: "10px 26px", borderRadius: "50px",
           background: "rgba(0,0,0,0.5)", fontSize: "22px", fontWeight: 700,
+          color: "white",
         },
         `${worldRank} mundial`,
       )
       : null,
-    // Avatar
+    // Avatar (sempre sobre a área escurecida do header)
     picB64
       ? img(picB64, 170, 170, {
         position: "absolute", top: "150px", left: "60px", borderRadius: "85px",
@@ -1119,19 +1138,20 @@ function buildMarkup(): N {
         {
           position: "absolute", top: "150px", left: "60px", width: "170px", height: "170px", borderRadius: "85px",
           border: "6px solid white", background: palette.base, alignItems: "center", justifyContent: "center",
-          fontSize: "68px", fontWeight: 900,
+          fontSize: "68px", fontWeight: 900, color: "white",
         },
         name[0]?.toUpperCase() ?? "?",
       ),
-    // Nome
+    // Nome (sempre sobre a área escurecida do header)
     el(
-      { position: "absolute", top: "166px", left: "262px", width: "880px", fontSize: "56px", fontWeight: 900 },
+      { position: "absolute", top: "166px", left: "262px", width: "880px", fontSize: "56px", fontWeight: 900, color: "white" },
       clip(name, 26),
     ),
-    // Chips: gênero / nacionalidade / gravadora / residência
+    // Chips: gênero / nacionalidade / gravadora / residência (idem, sempre
+    // sobre o header escurecido)
     chips.length
       ? el(
-        { position: "absolute", top: "252px", left: "262px", flexDirection: "row" },
+        { position: "absolute", top: "252px", left: "262px", flexDirection: "row", color: "white" },
         chips.map((c) =>
           el(
             {
@@ -1186,7 +1206,7 @@ function buildMarkup(): N {
         anyCover
           ? (t.coverB64
             ? img(t.coverB64, 50, 50, { borderRadius: "10px", objectFit: "cover", marginRight: "14px" })
-            : el({ width: "50px", height: "50px", borderRadius: "10px", background: "rgba(255,255,255,0.08)", marginRight: "14px" }))
+            : el({ width: "50px", height: "50px", borderRadius: "10px", background: textRgba(0.08), marginRight: "14px" }))
           : null,
         el({ flex: 1, flexDirection: "column", overflow: "hidden" }, [
           el({ fontSize: "20px", fontWeight: 700, whiteSpace: "nowrap" }, clip(t.title, titleMax)),
@@ -1222,7 +1242,7 @@ function buildMarkup(): N {
         el({ fontSize: "13px", fontWeight: 700, opacity: 0.65, letterSpacing: "2px", marginBottom: "12px" }, "FEED"),
         ...feedItems.flatMap((f: N, i: number) => [
           i
-            ? el({ height: "1px", background: "rgba(255,255,255,0.12)", marginTop: "12px", marginBottom: "12px" })
+            ? el({ height: "1px", background: textRgba(0.12), marginTop: "12px", marginBottom: "12px" })
             : null,
           el({ flexDirection: "column" }, [
             f.date
@@ -1240,7 +1260,7 @@ function buildMarkup(): N {
   // ---------- Raiz ----------
   return el(
     {
-      width: `${W}px`, height: `${H}px`, background: BG, color: "white", fontFamily: "Inter",
+      width: `${W}px`, height: `${H}px`, background: BG, color: TEXT, fontFamily: "Inter",
       flexDirection: "column", position: "relative", overflow: "hidden",
     },
     [
