@@ -237,7 +237,6 @@ function loadImage(url: string, label: string): Promise<string> {
 // Dados normalizados
 // -----------------------------------------------------------------
 const W = 1200;
-const H = 960;
 const BG = "#120a2e";
 const BRAND = "linear-gradient(90deg, #b433ff 0%, #284aff 100%)";
 const CARD_BG = "rgba(255,255,255,0.07)";
@@ -281,6 +280,7 @@ const feedAll = (Array.isArray(a.feed) ? a.feed : [])
   .filter((f: N) => f.text);
 
 const feedItems: N[] = [];
+let feedUsedH = 0;
 {
   let used = 0;
   for (const f of feedAll) {
@@ -288,9 +288,17 @@ const feedItems: N[] = [];
     const h = (f.date ? 20 : 0) + lines.length * 23 + (feedItems.length ? 25 : 0);
     if (used + h > FEED_BUDGET) break;
     used += h;
+    feedUsedH = used;
     feedItems.push({ ...f, lines });
   }
 }
+
+// Altura do card = conteúdo (sem "buraco" vazio no fim quando não há feed/bio)
+//   cabeçalho 340 + respiro 6 + estatísticas 84 + espaço 18 + [bio 49 + 18] + colunas + margem 40
+const tracksColH = 20 + 20 + 28 + tracks.length * 56 + Math.max(0, tracks.length - 1) * 8;
+const feedColH = feedItems.length ? feedUsedH + 20 + 20 + 28 + 12 : 0;
+const colsH = Math.max(tracksColH, feedColH, 120);
+const H = 340 + 6 + 84 + 18 + (bio ? 49 + 18 : 0) + colsH + 40;
 
 // Imagens (banner, foto e capas) em paralelo; cada uma validada sozinha
 let [bannerB64, picB64] = await Promise.all([
