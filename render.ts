@@ -104,147 +104,166 @@ function famousStat(label: string, value: string) {
   };
 }
 
-const [bannerB64, picB64] = await Promise.all([
+// bannerB64/picB64 agora são "let": se o Satori falhar com elas, zeramos e
+// tentamos de novo sem imagens (fallback), em vez de derrubar o card inteiro.
+let [bannerB64, picB64] = await Promise.all([
   loadImageAsBase64(a.banner),
   loadImageAsBase64(a.picture),
 ]);
 
 const name = String(a.name ?? "Artista");
 const meta = [a.genre, a.nationality, a.label].filter(Boolean).join(" • ");
+
+// Bio truncada para caber numa linha só (texto mais longo pode acionar um
+// bug de quebra de linha no Satori 0.10.3 rodando em Deno).
 const BIO_MAX = 50;
 const bioRaw = String(a.bio ?? "").trim();
 const bio = bioRaw.length > BIO_MAX ? bioRaw.slice(0, BIO_MAX - 1).trimEnd() + "…" : bioRaw;
+
 const tracks = (a.tracks ?? []).slice(0, 3);
 
-const markup = {
-  type: "div",
-  props: {
-    style: {
-      width: "1200px", height: "800px",
-      background: "linear-gradient(135deg, #b433ff, #284aff)",
-      color: "white", fontFamily: "Inter",
-      display: "flex", flexDirection: "column",
-      position: "relative", overflow: "hidden",
-    },
-    children: [
-      {
-        type: "div",
-        props: {
-          style: { position: "absolute", top: 0, left: 0, width: "1200px", height: "360px", display: "flex", overflow: "hidden" },
-          children: bannerB64
-            ? { type: "img", props: { src: bannerB64, style: { width: "1200px", height: "360px", objectFit: "cover" } } }
-            : null,
-        },
+// Construir o markup como função: assim dá pra gerar de novo, sem imagens,
+// se o Satori quebrar por causa de bannerB64/picB64 problemáticos.
+function buildMarkup() {
+  return {
+    type: "div",
+    props: {
+      style: {
+        width: "1200px", height: "800px",
+        background: "linear-gradient(135deg, #b433ff, #284aff)",
+        color: "white", fontFamily: "Inter",
+        display: "flex", flexDirection: "column",
+        position: "relative", overflow: "hidden",
       },
-      {
-        type: "div",
-        props: {
-          style: {
-            position: "absolute", top: 0, left: 0, width: "1200px", height: "360px", display: "flex",
-            background: "linear-gradient(to bottom, rgba(0,0,0,0.05), rgba(20,10,50,0.95))",
+      children: [
+        {
+          type: "div",
+          props: {
+            style: { position: "absolute", top: 0, left: 0, width: "1200px", height: "360px", display: "flex", overflow: "hidden" },
+            children: bannerB64
+              ? { type: "img", props: { src: bannerB64, style: { width: "1200px", height: "360px", objectFit: "cover" } } }
+              : null,
           },
         },
-      },
-      a.worldRank
-        ? {
-            type: "div",
-            props: {
-              style: {
-                position: "absolute", top: "30px", right: "40px", display: "flex",
-                background: "rgba(0,0,0,0.5)", borderRadius: "50px", padding: "10px 26px",
-                fontSize: "22px", fontWeight: 700,
-              },
-              children: `${a.worldRank} mundial`,
-            },
-          }
-        : null,
-      picB64
-        ? {
-            type: "img",
-            props: {
-              src: picB64,
-              style: {
-                position: "absolute", top: "230px", left: "60px", width: "200px", height: "200px",
-                borderRadius: "100px", border: "6px solid white", objectFit: "cover",
-              },
-            },
-          }
-        : {
-            type: "div",
-            props: {
-              style: {
-                position: "absolute", top: "230px", left: "60px", width: "200px", height: "200px",
-                borderRadius: "100px", border: "6px solid white", background: "#333",
-                display: "flex", alignItems: "center", justifyContent: "center", fontSize: "72px", fontWeight: 900,
-              },
-              children: name[0]?.toUpperCase() ?? "?",
+        {
+          type: "div",
+          props: {
+            style: {
+              position: "absolute", top: 0, left: 0, width: "1200px", height: "360px", display: "flex",
+              background: "linear-gradient(to bottom, rgba(0,0,0,0.05), rgba(20,10,50,0.95))",
             },
           },
-      {
-        type: "div",
-        props: {
-          style: { position: "absolute", top: "285px", left: "290px", width: "850px", display: "flex", flexDirection: "column" },
-          children: [
-            { type: "div", props: { style: { fontSize: "58px", fontWeight: 900, display: "flex" }, children: name } },
-            { type: "div", props: { style: { fontSize: "22px", fontWeight: 400, opacity: 0.92, marginTop: "10px", display: "flex" }, children: meta || " " } },
-          ],
         },
-      },
-            bio && bio.trim()
-        ? {
-            type: "div",
-            props: {
-              style: {
-                position: "absolute", top: "450px", left: "60px", width: "640px", display: "flex",
-                background: "rgba(0,0,0,0.28)", borderRadius: "16px", padding: "18px 24px",
-                fontSize: "20px", fontStyle: "italic", lineHeight: 1.4,
-              },
-              children: bio,
-            },
-          }
-        : null,
-      {
-        type: "div",
-        props: {
-          style: { position: "absolute", top: "450px", right: "60px", width: "400px", display: "flex", flexDirection: "column", gap: "12px" },
-          children: [
-            famousStat("SEGUIDORES", String(a.followers ?? "N/A")),
-            famousStat("OUVINTES MENSAIS", String(a.listeners ?? "N/A")),
-          ],
-        },
-      },
-      {
-        type: "div",
-        props: {
-          style: {
-            position: "absolute", bottom: "28px", left: "60px", width: "1080px", height: "170px",
-            background: "rgba(0,0,0,0.3)", borderRadius: "16px", padding: "16px 26px",
-            display: "flex", flexDirection: "column",
-          },
-          children: [
-            { type: "div", props: { style: { fontSize: "13px", fontWeight: 700, opacity: 0.7, letterSpacing: "2px", marginBottom: "8px", display: "flex" }, children: "FAIXAS POPULARES" } },
-            ...tracks.map((t: any) => ({
+        a.worldRank
+          ? {
               type: "div",
               props: {
-                style: { display: "flex", flexDirection: "row", alignItems: "center", padding: "6px 0", fontSize: "21px" },
-                children: [
-                  { type: "div", props: { style: { width: "34px", fontWeight: 900, opacity: 0.7, display: "flex" }, children: String(t.pos) } },
-                  { type: "div", props: { style: { flex: 1, fontWeight: 700, display: "flex" }, children: String(t.title).slice(0, 48) } },
-                  { type: "div", props: { style: { fontWeight: 400, display: "flex" }, children: String(t.streams) } },
-                ],
+                style: {
+                  position: "absolute", top: "30px", right: "40px", display: "flex",
+                  background: "rgba(0,0,0,0.5)", borderRadius: "50px", padding: "10px 26px",
+                  fontSize: "22px", fontWeight: 700,
+                },
+                children: `${a.worldRank} mundial`,
               },
-            })),
-          ],
+            }
+          : null,
+        picB64
+          ? {
+              type: "img",
+              props: {
+                src: picB64,
+                style: {
+                  position: "absolute", top: "230px", left: "60px", width: "200px", height: "200px",
+                  borderRadius: "100px", border: "6px solid white", objectFit: "cover",
+                },
+              },
+            }
+          : {
+              type: "div",
+              props: {
+                style: {
+                  position: "absolute", top: "230px", left: "60px", width: "200px", height: "200px",
+                  borderRadius: "100px", border: "6px solid white", background: "#333",
+                  display: "flex", alignItems: "center", justifyContent: "center", fontSize: "72px", fontWeight: 900,
+                },
+                children: name[0]?.toUpperCase() ?? "?",
+              },
+            },
+        {
+          type: "div",
+          props: {
+            style: { position: "absolute", top: "285px", left: "290px", width: "850px", display: "flex", flexDirection: "column" },
+            children: [
+              { type: "div", props: { style: { fontSize: "58px", fontWeight: 900, display: "flex" }, children: name } },
+              { type: "div", props: { style: { fontSize: "22px", fontWeight: 400, opacity: 0.92, marginTop: "10px", display: "flex" }, children: meta || " " } },
+            ],
+          },
         },
-      },
-    ].filter(Boolean),
-  },
-};
+        bio && bio.trim()
+          ? {
+              type: "div",
+              props: {
+                style: {
+                  position: "absolute", top: "450px", left: "60px", width: "640px", display: "flex",
+                  background: "rgba(0,0,0,0.28)", borderRadius: "16px", padding: "18px 24px",
+                  fontSize: "20px", fontStyle: "italic", lineHeight: 1.4,
+                },
+                children: bio,
+              },
+            }
+          : null,
+        {
+          type: "div",
+          props: {
+            style: { position: "absolute", top: "450px", right: "60px", width: "400px", display: "flex", flexDirection: "column", gap: "12px" },
+            children: [
+              famousStat("SEGUIDORES", String(a.followers ?? "N/A")),
+              famousStat("OUVINTES MENSAIS", String(a.listeners ?? "N/A")),
+            ],
+          },
+        },
+        {
+          type: "div",
+          props: {
+            style: {
+              position: "absolute", bottom: "28px", left: "60px", width: "1080px", height: "170px",
+              background: "rgba(0,0,0,0.3)", borderRadius: "16px", padding: "16px 26px",
+              display: "flex", flexDirection: "column",
+            },
+            children: [
+              { type: "div", props: { style: { fontSize: "13px", fontWeight: 700, opacity: 0.7, letterSpacing: "2px", marginBottom: "8px", display: "flex" }, children: "FAIXAS POPULARES" } },
+              ...tracks.map((t: any) => ({
+                type: "div",
+                props: {
+                  style: { display: "flex", flexDirection: "row", alignItems: "center", padding: "6px 0", fontSize: "21px" },
+                  children: [
+                    { type: "div", props: { style: { width: "34px", fontWeight: 900, opacity: 0.7, display: "flex" }, children: String(t.pos) } },
+                    { type: "div", props: { style: { flex: 1, fontWeight: 700, display: "flex" }, children: String(t.title).slice(0, 48) } },
+                    { type: "div", props: { style: { fontWeight: 400, display: "flex" }, children: String(t.streams) } },
+                  ],
+                },
+              })),
+            ],
+          },
+        },
+      ].filter(Boolean),
+    },
+  };
+}
 
 // -----------------------------
-// Renderizar
+// Renderizar (com fallback se as imagens quebrarem o Satori)
 // -----------------------------
-const svg = await satori(markup as any, { width: 1200, height: 800, fonts });
+let svg: string;
+try {
+  svg = await satori(buildMarkup() as any, { width: 1200, height: 800, fonts });
+} catch (e) {
+  console.log("⚠️ Satori falhou com banner/foto, tentando de novo sem imagens:", (e as Error).message);
+  bannerB64 = "";
+  picB64 = "";
+  svg = await satori(buildMarkup() as any, { width: 1200, height: 800, fonts });
+}
+
 const png = await svg2png(svg, { width: 1200, height: 800 });
 console.log("✅ PNG gerado:", png.byteLength, "bytes");
 
