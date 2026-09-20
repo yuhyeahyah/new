@@ -868,15 +868,19 @@ async function extractColorFromBytes(url: string): Promise<string | null> {
   }
 
   let { r, g, b, saturation } = best;
-  if (saturation < 0.35) {
-    // Boost proporcional: quanto mais perto de 0% de saturação, mais fraco
-    // o empurrão — uma imagem quase cinza (ruído de compressão decidindo
-    // o canal "dominante") não deve virar uma cor vibrante artificial.
-    // Em saturation=0 o boost é ~25% do valor máximo; em saturation=0.34
-    // (quase no limiar) o boost é quase o valor máximo (60/20).
-    const strength = 1 - saturation / 0.35; // 1 (bem dessaturado) -> 0 (no limiar)
-    const boost = Math.round(25 + strength * 35); // 25..60
-    const cut = Math.round(8 + strength * 12); // 8..20
+  // Limiar mais baixo (22%, não 35%): a 34.6% de saturação real (caso de
+  // teste com um banner esverdeado bem pálido) o resultado já é uma cor
+  // perfeitamente reconhecível — não precisa de ajuda. Só imagens realmente
+  // próximas do cinza (abaixo de ~22%, mas ainda acima do piso de descarte
+  // de 12%) recebem um empurrão, e mesmo assim mais fraco que antes.
+  const BOOST_THRESHOLD = 0.22;
+  if (saturation < BOOST_THRESHOLD) {
+    // Boost proporcional: quanto mais perto de 0% de saturação, mais forte
+    // o empurrão (até um teto bem mais contido que antes); perto do limiar
+    // de 22% o boost já é bem sutil.
+    const strength = 1 - saturation / BOOST_THRESHOLD; // 1 (bem dessaturado) -> 0 (no limiar)
+    const boost = Math.round(12 + strength * 23); // 12..35 (antes: 25..60)
+    const cut = Math.round(4 + strength * 8); // 4..12 (antes: 8..20)
 
     if (r >= g && r >= b) {
       r = Math.min(255, r + boost);
@@ -892,6 +896,8 @@ async function extractColorFromBytes(url: string): Promise<string | null> {
       g = Math.max(0, g - cut);
     }
     console.log(`📈 Saturação baixa (${(saturation * 100).toFixed(1)}%) — boost proporcional aplicado (+${boost}/-${cut})`);
+  } else {
+    console.log(`✅ Saturação suficiente (${(saturation * 100).toFixed(1)}%) — sem boost`);
   }
 
   const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
@@ -938,8 +944,25 @@ type Palette = {
 
 function generatePalette(color: string): Palette {
   const rgb = hexToRgb(color);
-  const darker = { r: Math.max(0, rgb.r - 40), g: Math.max(0, rgb.g - 30), b: Math.max(0, rgb.b - 50) };
-  const darkest = { r: Math.max(0, rgb.r - 85), g: Math.max(0, rgb.g - 70), b: Math.max(0, rgb.b - 110) };
+
+  // Escurecimento PROPORCIONAL (multiplicativo), não subtrativo por valor
+  // fixo. Subtrair um valor absoluto grande do canal B (por exemplo) some
+  // desproporcionalmente mais de canais que já são baixos, distorcendo o
+  // matiz original — foi isso que fazia um amarelo puro (#efdf87) virar
+  // visualmente oliva/mostarda depois de escurecido. Multiplicar por um
+  // fator preserva a proporção entre R/G/B e portanto o matiz.
+  const scaleDarker = 0.72; // ~28% mais escuro, mantendo o tom
+  const scaleDarkest = 0.5; // ~50% mais escuro — ainda reconhecível como o mesmo tom
+  const darker = {
+    r: Math.round(rgb.r * scaleDarker),
+    g: Math.round(rgb.g * scaleDarker),
+    b: Math.round(rgb.b * scaleDarker),
+  };
+  const darkest = {
+    r: Math.round(rgb.r * scaleDarkest),
+    g: Math.round(rgb.g * scaleDarkest),
+    b: Math.round(rgb.b * scaleDarkest),
+  };
   // Segunda cor do gradiente: mesmo tom, deslocado pra um tom mais "frio"
   // (leve giro pra azul) — mantém a identidade visual sem ficar um degradê
   // genérico de duas cores aleatórias.
