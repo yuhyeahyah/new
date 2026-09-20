@@ -976,13 +976,33 @@ function generatePalette(color: string): Palette {
   // genérico de duas cores aleatórias.
   const brandEnd = { r: Math.max(0, rgb.r - 60), g: Math.max(0, rgb.g - 20), b: Math.min(255, rgb.b + 50) };
 
+  // Cartões internos (estatísticas, bio, faixas, feed): precisam se
+  // destacar do fundo (BG = darkest) com uma camada visível, mas sempre
+  // dentro do mesmo tom — nunca virando cinza neutro.
+  //
+  // Em fundo escuro, clarear um pouco (rgb+20 com opacidade baixa) já
+  // cria contraste suficiente contra um BG escuro — comportamento original.
+  //
+  // Em fundo CLARO (pastel), clarear ainda mais não ajuda em nada: o
+  // cartão fica quase idêntico ao fundo e o texto branco cai sobre bege
+  // claro (baixo contraste). Nesse caso o cartão precisa ESCURECER em
+  // relação ao BG, na mesma família de cor, criando contraste em camadas
+  // (fundo claro + cartão mais escuro na mesma paleta + texto branco).
+  const isLight = luminance > 0.55;
+  const cardBg = isLight
+    ? `rgba(${Math.round(rgb.r * 0.35)}, ${Math.round(rgb.g * 0.35)}, ${Math.round(rgb.b * 0.35)}, 0.55)`
+    : `rgba(${Math.min(255, rgb.r + 20)}, ${Math.min(255, rgb.g + 20)}, ${Math.min(255, rgb.b + 20)}, 0.10)`;
+  const cardBorder = isLight
+    ? `1px solid rgba(${Math.round(rgb.r * 0.5)}, ${Math.round(rgb.g * 0.5)}, ${Math.round(rgb.b * 0.5)}, 0.35)`
+    : `1px solid rgba(${Math.min(255, rgb.r + 40)}, ${Math.min(255, rgb.g + 40)}, ${Math.min(255, rgb.b + 40)}, 0.18)`;
+
   return {
     base: `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`,
     darker: `rgb(${darker.r}, ${darker.g}, ${darker.b})`,
     darkest: `rgb(${darkest.r}, ${darkest.g}, ${darkest.b})`,
     brand: `linear-gradient(90deg, rgb(${rgb.r}, ${rgb.g}, ${rgb.b}) 0%, rgb(${brandEnd.r}, ${brandEnd.g}, ${brandEnd.b}) 100%)`,
-    cardBg: `rgba(${Math.min(255, rgb.r + 20)}, ${Math.min(255, rgb.g + 20)}, ${Math.min(255, rgb.b + 20)}, 0.10)`,
-    cardBorder: `1px solid rgba(${Math.min(255, rgb.r + 40)}, ${Math.min(255, rgb.g + 40)}, ${Math.min(255, rgb.b + 40)}, 0.18)`,
+    cardBg,
+    cardBorder,
   };
 }
 
@@ -1076,15 +1096,12 @@ const CARD_BORDER = palette.cardBorder;
 // Cor de texto adaptativa: em fundo claro (ex.: amarelo pastel escurecido
 // só um pouco), texto branco perde contraste — usa quase-preto. Em fundo
 // escuro (o caso mais comum), mantém branco como sempre foi.
-const bgRgb = hexToRgb(dominantColor); // aproximação: BG é uma versão escalada da mesma cor, luminância segue igual
-const bgLuminance = (0.299 * bgRgb.r + 0.587 * bgRgb.g + 0.114 * bgRgb.b) / 255;
-const isLightBg = bgLuminance > 0.6;
-
-const TEXT_RGB = isLightBg ? "20, 18, 8" : "255, 255, 255"; // quase-preto vs branco
+// Texto sempre branco — o contraste em fundo claro vem de escurecer os
+// cartões internos (ver CARD_BG/CARD_BORDER em generatePalette), não de
+// mudar a cor do texto.
+const TEXT_RGB = "255, 255, 255";
 const TEXT = `rgb(${TEXT_RGB})`;
-// "Preto suave" pra usar em pills/overlays que hoje são pretos fixos
-// (mantém esses como estão — pretos translúcidos continuam legíveis tanto
-// em fundo claro quanto escuro, então não precisam adaptar).
+
 function textRgba(alpha: number): string {
   return `rgba(${TEXT_RGB}, ${alpha})`;
 }
