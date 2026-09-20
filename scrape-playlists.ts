@@ -8,7 +8,8 @@
 // assim ela não fica escrita no código do repositório público.
 const BASE = (globalThis.Deno?.env.get("SITE_URL") ?? "").trim().replace(/\/+$/, "");
 const OUT_FILE = "playlists.json";
-const CONCURRENCY = 5; // quantas playlists baixar ao mesmo tempo (educado com o site)
+const CONCURRENCY = 2; // quantas playlists baixar ao mesmo tempo (5 dava 500 em rajada)
+const PAUSE_MS = 250; // pausa depois de cada playlist, pra não sobrecarregar o site
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -135,6 +136,12 @@ export function parsePlaylistPage(html: string) {
   };
 }
 
+// Slugs como "A-List:Pop" NÃO podem virar "A-List%3APop": o site devolve página
+// vazia (status 200) nesse caso. Escapa só o que quebraria a URL de verdade.
+export function slugToPath(slug: string): string {
+  return encodeURIComponent(slug).replace(/%3A/gi, ":").replace(/%21/g, "!");
+}
+
 // -----------------------------------------------------------------
 // 3) Execução
 // -----------------------------------------------------------------
@@ -171,8 +178,14 @@ async function main() {
   const failed: string[] = [];
   const playlists = await pool(list, CONCURRENCY, async (pl) => {
     try {
-      const html = await fetchText(`${BASE}/playlist/${encodeURIComponent(pl.slug)}`);
+      const html = await fetchText(`${BASE}/playlist/${slugToPath(pl.slug)}`);
       const parsed = parsePlaylistPage(html);
+      // Página que "carregou" mas sem nenhuma faixa = tratada como FALHA
+      // (antes passava como sucesso e gravava a playlist vazia).
+      if (parsed.tracks.length === 0) {
+        throw new Error("página sem faixas (formato mudou ou slug errado)");
+      }
+      await new Promise((r) => setTimeout(r, PAUSE_MS));
       console.log(`  ✓ ${pl.name} (${pl.platform}): ${parsed.tracks.length} faixas, capa: ${parsed.coverName || "-"}`);
       return { ...pl, ...parsed };
     } catch (e) {
