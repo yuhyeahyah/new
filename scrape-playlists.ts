@@ -221,13 +221,13 @@ async function main() {
 
   // Criptografa antes de gravar: o repositório é público, então o arquivo
   // só é legível por quem tem a PLAYLISTS_KEY (GitHub secret + Cloudflare secret).
-  await Deno.writeTextFile(OUT_FILE, await encrypt(JSON.stringify(data), KEY));
-  console.log(`✅ ${OUT_FILE} gravado (criptografado): ${ok.length} playlists, ${failed.length} falharam`);
-}
-
   const t0 = Date.now();
   const enc = await encrypt(JSON.stringify(data), KEY);
   console.log(`🔐 criptografado em ${Date.now() - t0}ms (${enc.length} bytes)`);
   await Deno.writeTextFile(OUT_FILE, enc);
   console.log(`✅ ${OUT_FILE} gravado: ${ok.length} playlists, ${failed.length} falharam`);
+}
+
+if (import.meta.main) {
+  await main();
 }
