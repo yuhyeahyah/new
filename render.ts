@@ -203,6 +203,10 @@ async function imageWorks(uri: string, label: string): Promise<boolean> {
   }
 }
 
+// Guarda os bytes brutos já baixados de cada URL (banner/foto), pra
+// reaproveitar na extração de cor sem baixar a imagem de novo.
+const rawImageBytes = new Map<string, Uint8Array>();
+
 async function loadImageUncached(url: string, label: string): Promise<string> {
   const got = await fetchImageBytes(url);
   if (!got) return "";
@@ -211,6 +215,8 @@ async function loadImageUncached(url: string, label: string): Promise<string> {
     console.log(`⚠️ imagem [${label}] grande demais (${got.buf.byteLength} bytes), ignorada`);
     return "";
   }
+
+  rawImageBytes.set(url, got.buf);
 
   const sniffed = sniffMime(got.buf);
   const mime = sniffed || got.type.split(";")[0].trim() || "image/png";
@@ -234,13 +240,654 @@ function loadImage(url: string, label: string): Promise<string> {
 }
 
 // -----------------------------------------------------------------
+// Extração de cor dominante (banner > foto > nome)
+//
+// Reaproveita os bytes já baixados em `rawImageBytes` (a mesma imagem
+// que o Satori usa) — não faz nenhuma chamada de rede extra. Decodifica
+// PNG e JPEG (baseline) manualmente, já que aqui não temos DOM/Canvas.
+// -----------------------------------------------------------------
+
+type DecodedImage = { pixels: Uint8Array; width: number; height: number };
+
+// --- PNG ---------------------------------------------------------
+async function decodePNG(pngBytes: Uint8Array): Promise<DecodedImage | null> {
+  try {
+    const SIG = [137, 80, 78, 71, 13, 10, 26, 10];
+    for (let i = 0; i < 8; i++) {
+      if (pngBytes[i] !== SIG[i]) {
+        console.log("⚠️ Assinatura PNG inválida");
+        return null;
+      }
+    }
+    const view = new DataView(pngBytes.buffer, pngBytes.byteOffset);
+    let offset = 8;
+    let width = 0, height = 0, bitDepth = 0, colorType = 0;
+    const idatChunks: Uint8Array[] = [];
+
+    while (offset + 12 <= pngBytes.length) {
+      const length = view.getUint32(offset);
+      const type = String.fromCharCode(
+        pngBytes[offset + 4],
+        pngBytes[offset + 5],
+        pngBytes[offset + 6],
+        pngBytes[offset + 7],
+      );
+      const data = pngBytes.slice(offset + 8, offset + 8 + length);
+      if (type === "IHDR") {
+        width = view.getUint32(offset + 8);
+        height = view.getUint32(offset + 12);
+        bitDepth = data[8];
+        colorType = data[9];
+      } else if (type === "IDAT") {
+        idatChunks.push(data);
+      } else if (type === "IEND") {
+        break;
+      }
+      offset += 12 + length;
+    }
+
+    if (!width || !height) return null;
+    if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+      console.log(`⚠️ PNG não suportado: bitDepth=${bitDepth} colorType=${colorType}`);
+      return null;
+    }
+
+    const totalLen = idatChunks.reduce((s, c) => s + c.length, 0);
+    const idatData = new Uint8Array(totalLen);
+    let pos = 0;
+    for (const chunk of idatChunks) {
+      idatData.set(chunk, pos);
+      pos += chunk.length;
+    }
+
+    const ds = new DecompressionStream("deflate");
+    const writer = ds.writable.getWriter();
+    const reader = ds.readable.getReader();
+    writer.write(idatData);
+    writer.close();
+
+    const decompChunks: Uint8Array[] = [];
+    let done = false;
+    while (!done) {
+      const { value, done: d } = await reader.read();
+      if (value) decompChunks.push(value);
+      done = d;
+    }
+    const rawLen = decompChunks.reduce((s, c) => s + c.length, 0);
+    const rawData = new Uint8Array(rawLen);
+    pos = 0;
+    for (const chunk of decompChunks) {
+      rawData.set(chunk, pos);
+      pos += chunk.length;
+    }
+
+    const bpp = colorType === 6 ? 4 : 3;
+    const stride = width * bpp + 1;
+    const pixels = new Uint8Array(width * height * 4);
+    let prevRecon = new Uint8Array(width * bpp);
+
+    for (let y = 0; y < height; y++) {
+      const filterType = rawData[y * stride];
+      const rawRow = rawData.subarray(y * stride + 1, y * stride + 1 + width * bpp);
+      const recon = new Uint8Array(width * bpp);
+      for (let x = 0; x < rawRow.length; x++) {
+        const raw = rawRow[x];
+        const av = x >= bpp ? recon[x - bpp] : 0;
+        const bv = prevRecon[x] || 0;
+        const cv = x >= bpp ? prevRecon[x - bpp] || 0 : 0;
+        switch (filterType) {
+          case 0:
+            recon[x] = raw;
+            break;
+          case 1:
+            recon[x] = (raw + av) & 255;
+            break;
+          case 2:
+            recon[x] = (raw + bv) & 255;
+            break;
+          case 3:
+            recon[x] = (raw + Math.floor((av + bv) / 2)) & 255;
+            break;
+          case 4: {
+            const pa = Math.abs(bv - cv), pb = Math.abs(av - cv), pc = Math.abs(av + bv - 2 * cv);
+            recon[x] = (raw + (pa <= pb && pa <= pc ? av : pb <= pc ? bv : cv)) & 255;
+            break;
+          }
+          default:
+            recon[x] = raw;
+        }
+      }
+      for (let x = 0; x < width; x++) {
+        const pi = (y * width + x) * 4;
+        const ri = x * bpp;
+        pixels[pi] = recon[ri];
+        pixels[pi + 1] = recon[ri + 1];
+        pixels[pi + 2] = recon[ri + 2];
+        pixels[pi + 3] = bpp === 4 ? recon[ri + 3] : 255;
+      }
+      prevRecon = recon;
+    }
+
+    return { pixels, width, height };
+  } catch (e) {
+    console.log("⚠️ decodePNG erro:", (e as Error).message);
+    return null;
+  }
+}
+
+// --- JPEG (baseline, sem progressive) -----------------------------
+// Decoder minimalista: cobre JPEG baseline DCT (o caso comum de fotos
+// de perfil/banner). JPEGs progressivos ou 12-bit não são suportados
+// e caem no fallback (retorna null -> extractDominantColor tenta a
+// próxima imagem ou gera cor pelo nome).
+function decodeJPEG(data: Uint8Array): DecodedImage | null {
+  try {
+    let offset = 0;
+    const readUint16 = () => {
+      const v = (data[offset] << 8) | data[offset + 1];
+      offset += 2;
+      return v;
+    };
+
+    if (readUint16() !== 0xffd8) return null; // SOI
+
+    let qTables: Record<number, Int32Array> = {};
+    let frame: {
+      width: number;
+      height: number;
+      components: { id: number; h: number; v: number; qId: number }[];
+    } | null = null;
+    let huffmanTablesDC: Record<number, N> = {};
+    let huffmanTablesAC: Record<number, N> = {};
+    let scanData: Uint8Array | null = null;
+    let scanComponents: { id: number; dcId: number; acId: number }[] = [];
+
+    const buildHuffmanTable = (bits: Uint8Array, values: Uint8Array) => {
+      let code = 0;
+      const table: N = {};
+      let k = 0;
+      for (let i = 0; i < 16; i++) {
+        for (let j = 0; j < bits[i]; j++) {
+          table[`${i + 1}_${code}`] = values[k];
+          code++;
+          k++;
+        }
+        code <<= 1;
+      }
+      return { table, maxLen: 16 };
+    };
+
+    while (offset < data.length) {
+      if (data[offset] !== 0xff) {
+        offset++;
+        continue;
+      }
+      const marker = readUint16();
+
+      if (marker === 0xffd9) break; // EOI
+      if (marker === 0xff01 || (marker >= 0xffd0 && marker <= 0xffd7)) continue;
+
+      const length = readUint16();
+      const segStart = offset;
+
+      if (marker === 0xffdb) {
+        // DQT
+        let p = segStart;
+        const end = segStart + length - 2;
+        while (p < end) {
+          const pq = data[p] >> 4;
+          const tq = data[p] & 15;
+          p++;
+          const table = new Int32Array(64);
+          for (let i = 0; i < 64; i++) {
+            table[i] = pq === 0 ? data[p++] : readUint16At(p, (n) => (p += n));
+          }
+          qTables[tq] = table;
+        }
+      } else if (marker === 0xffc0 || marker === 0xffc1) {
+        // SOF0/1 - baseline
+        let p = segStart;
+        p++; // precision
+        const height = (data[p] << 8) | data[p + 1];
+        p += 2;
+        const width = (data[p] << 8) | data[p + 1];
+        p += 2;
+        const numComponents = data[p];
+        p++;
+        const components = [];
+        for (let i = 0; i < numComponents; i++) {
+          const id = data[p];
+          const hv = data[p + 1];
+          const qId = data[p + 2];
+          components.push({ id, h: hv >> 4, v: hv & 15, qId });
+          p += 3;
+        }
+        frame = { width, height, components };
+      } else if (marker === 0xffc2) {
+        // progressive - não suportado
+        console.log("⚠️ JPEG progressivo não suportado");
+        return null;
+      } else if (marker === 0xffc4) {
+        // DHT
+        let p = segStart;
+        const end = segStart + length - 2;
+        while (p < end) {
+          const tc = data[p] >> 4;
+          const th = data[p] & 15;
+          p++;
+          const bits = data.slice(p, p + 16);
+          p += 16;
+          let total = 0;
+          for (let i = 0; i < 16; i++) total += bits[i];
+          const values = data.slice(p, p + total);
+          p += total;
+          const built = buildHuffmanTable(bits, values);
+          if (tc === 0) huffmanTablesDC[th] = built;
+          else huffmanTablesAC[th] = built;
+        }
+      } else if (marker === 0xffda) {
+        // SOS
+        let p = segStart;
+        const ns = data[p];
+        p++;
+        scanComponents = [];
+        for (let i = 0; i < ns; i++) {
+          const id = data[p];
+          const td = data[p + 1] >> 4;
+          const ta = data[p + 1] & 15;
+          scanComponents.push({ id, dcId: td, acId: ta });
+          p += 2;
+        }
+        p += 3; // Ss, Se, AhAl
+        // dados de scan vão até o próximo marker que não seja RSTn
+        let scanEnd = p;
+        while (scanEnd < data.length - 1) {
+          if (data[scanEnd] === 0xff) {
+            const next = data[scanEnd + 1];
+            if (next !== 0x00 && !(next >= 0xd0 && next <= 0xd7)) break;
+          }
+          scanEnd++;
+        }
+        scanData = data.slice(p, scanEnd);
+        offset = scanEnd;
+        break; // só precisamos do primeiro scan pra amostragem de cor
+      }
+
+      offset = segStart + length - 2;
+    }
+
+    function readUint16At(p: number, advance: (n: number) => void): number {
+      const v = (data[p] << 8) | data[p + 1];
+      advance(2);
+      return v;
+    }
+
+    if (!frame || !scanData) return null;
+
+    // Decodificação completa de JPEG é cara para o que precisamos (só a cor
+    // dominante). Em vez de implementar IDCT+upsampling completos aqui,
+    // aproximamos usando os coeficientes DC de cada bloco de luminância/
+    // crominância via um decodificador simplificado de Huffman + DC.
+    const result = decodeJPEGApprox(data, frame, scanData, scanComponents, huffmanTablesDC, huffmanTablesAC, qTables);
+    return result;
+  } catch (e) {
+    console.log("⚠️ decodeJPEG erro:", (e as Error).message);
+    return null;
+  }
+}
+
+// Decodificador aproximado: extrai só o coeficiente DC (média de bloco 8x8)
+// de cada componente via Huffman, reconstrói uma imagem em baixa resolução
+// (1 pixel por bloco MCU) em YCbCr -> RGB. É suficiente para estimar a cor
+// dominante sem implementar IDCT completo.
+function decodeJPEGApprox(
+  data: Uint8Array,
+  frame: { width: number; height: number; components: { id: number; h: number; v: number; qId: number }[] },
+  scanData: Uint8Array,
+  scanComponents: { id: number; dcId: number; acId: number }[],
+  huffDC: Record<number, N>,
+  huffAC: Record<number, N>,
+  qTables: Record<number, Int32Array>,
+): DecodedImage | null {
+  // Remove byte stuffing (0xFF 0x00 -> 0xFF)
+  const clean: number[] = [];
+  for (let i = 0; i < scanData.length; i++) {
+    if (scanData[i] === 0xff && scanData[i + 1] === 0x00) {
+      clean.push(0xff);
+      i++;
+    } else if (scanData[i] === 0xff && scanData[i + 1] >= 0xd0 && scanData[i + 1] <= 0xd7) {
+      i++; // pula restart markers
+    } else {
+      clean.push(scanData[i]);
+    }
+  }
+  const bytes = new Uint8Array(clean);
+
+  let bitPos = 0;
+  const totalBits = bytes.length * 8;
+  const readBit = (): number => {
+    if (bitPos >= totalBits) return 0;
+    const byteIdx = bitPos >> 3;
+    const bitIdx = 7 - (bitPos & 7);
+    bitPos++;
+    return (bytes[byteIdx] >> bitIdx) & 1;
+  };
+
+  const decodeHuff = (table: N): number => {
+    let code = 0;
+    for (let len = 1; len <= 16; len++) {
+      code = (code << 1) | readBit();
+      const key = `${len}_${code}`;
+      if (table.table[key] !== undefined) return table.table[key];
+    }
+    return 0;
+  };
+
+  const receive = (n: number): number => {
+    let v = 0;
+    for (let i = 0; i < n; i++) v = (v << 1) | readBit();
+    return v;
+  };
+
+  const extend = (v: number, n: number): number => {
+    if (n === 0) return 0;
+    return v < 1 << (n - 1) ? v - (1 << n) + 1 : v;
+  };
+
+  const hMax = Math.max(...frame.components.map((c) => c.h));
+  const vMax = Math.max(...frame.components.map((c) => c.v));
+  const mcuW = 8 * hMax;
+  const mcuH = 8 * vMax;
+  const mcusX = Math.ceil(frame.width / mcuW);
+  const mcusY = Math.ceil(frame.height / mcuH);
+
+  const dcPrev: Record<number, number> = {};
+  for (const c of scanComponents) dcPrev[c.id] = 0;
+
+  // Guarda o valor DC médio de cada componente por MCU (aproxima 1 amostra
+  // de cor por bloco de 8x(hMax/h) x 8x(vMax/v) pixels).
+  const dcSamples: { id: number; value: number }[] = [];
+
+  outer:
+  for (let my = 0; my < mcusY; my++) {
+    for (let mx = 0; mx < mcusX; mx++) {
+      for (const comp of frame.components) {
+        const sc = scanComponents.find((s) => s.id === comp.id);
+        if (!sc) continue;
+        const dcTable = huffDC[sc.dcId];
+        const acTable = huffAC[sc.acId];
+        if (!dcTable || !acTable) break outer;
+
+        for (let by = 0; by < comp.v; by++) {
+          for (let bx = 0; bx < comp.h; bx++) {
+            // DC
+            const t = decodeHuff(dcTable);
+            const diff = t === 0 ? 0 : extend(receive(t), t);
+            dcPrev[comp.id] += diff;
+            const q = qTables[comp.qId];
+            const dcValue = dcPrev[comp.id] * (q ? q[0] : 1);
+            dcSamples.push({ id: comp.id, value: dcValue });
+
+            // Consome (sem usar) os coeficientes AC pra manter o bitstream
+            // sincronizado — não precisamos deles pra cor dominante.
+            let k = 1;
+            while (k < 64) {
+              const rs = decodeHuff(acTable);
+              const r = rs >> 4;
+              const s = rs & 15;
+              if (s === 0) {
+                if (r === 15) {
+                  k += 16;
+                  continue;
+                }
+                break; // EOB
+              }
+              k += r;
+              extend(receive(s), s);
+              k++;
+            }
+          }
+        }
+      }
+      if (bitPos >= totalBits) break outer;
+    }
+  }
+
+  if (!dcSamples.length) return null;
+
+  // Agrupa amostras por componente (assume 1=Y, 2=Cb, 3=Cr — ordem padrão
+  // JFIF) e faz a média geral de cada canal para estimar 1 cor "média"
+  // representativa da imagem inteira.
+  const byComp: Record<number, number[]> = {};
+  for (const s of dcSamples) {
+    (byComp[s.id] ||= []).push(s.value);
+  }
+  const ids = frame.components.map((c) => c.id).sort((x, y) => x - y);
+  const avg = (arr: number[] | undefined) =>
+    arr && arr.length ? arr.reduce((a2, b2) => a2 + b2, 0) / arr.length : 0;
+
+  const yAvg = avg(byComp[ids[0]]) / 8 + 128; // DC já escalado, /8 normaliza bloco 8x8, +128 remove level shift
+  const cbAvg = ids[1] !== undefined ? avg(byComp[ids[1]]) / 8 + 128 : 128;
+  const crAvg = ids[2] !== undefined ? avg(byComp[ids[2]]) / 8 + 128 : 128;
+
+  const r = clamp255(yAvg + 1.402 * (crAvg - 128));
+  const g = clamp255(yAvg - 0.344136 * (cbAvg - 128) - 0.714136 * (crAvg - 128));
+  const b = clamp255(yAvg + 1.772 * (cbAvg - 128));
+
+  // Como essa via só produz uma cor média (não pixels reais por posição),
+  // devolvemos uma "imagem" 1x1 — extractDominantFromPixels aceita isso
+  // (ele varre pixel a pixel, então funciona igual com 1 pixel).
+  const pixels = new Uint8Array([r, g, b, 255]);
+  return { pixels, width: 1, height: 1 };
+}
+
+function clamp255(v: number): number {
+  return Math.max(0, Math.min(255, Math.round(v)));
+}
+
+// --- Seleção da cor dominante a partir dos pixels decodificados ---
+function extractDominantFromPixels(
+  pixels: Uint8Array,
+): { r: number; g: number; b: number; saturation: number } | null {
+  const QUANT_SHIFT = 3;
+  const MIN_SAT = 0.22;
+  const MIN_BRIGHT = 10;
+  const MAX_BRIGHT = 245;
+  const TOP_N = 10;
+
+  const buckets = new Map<number, number>();
+  const bucketSum = new Map<number, { r: number; g: number; b: number; n: number }>();
+
+  for (let i = 0; i < pixels.length; i += 4) {
+    const r2 = pixels[i], g2 = pixels[i + 1], b2 = pixels[i + 2], a2 = pixels[i + 3];
+    if (a2 < 200) continue;
+
+    const brightness = (r2 + g2 + b2) / 3;
+    if (brightness < MIN_BRIGHT || brightness > MAX_BRIGHT) continue;
+
+    const rn = r2 / 255, gn = g2 / 255, bn = b2 / 255;
+    const max2 = Math.max(rn, gn, bn), min2 = Math.min(rn, gn, bn);
+    const l = (max2 + min2) / 2;
+    const s = max2 === min2 ? 0 : l > 0.5 ? (max2 - min2) / (2 - max2 - min2) : (max2 - min2) / (max2 + min2);
+    if (s < MIN_SAT) continue;
+
+    const key = ((r2 >> QUANT_SHIFT) << 16) | ((g2 >> QUANT_SHIFT) << 8) | (b2 >> QUANT_SHIFT);
+    buckets.set(key, (buckets.get(key) ?? 0) + 1);
+    const prev = bucketSum.get(key) ?? { r: 0, g: 0, b: 0, n: 0 };
+    bucketSum.set(key, { r: prev.r + r2, g: prev.g + g2, b: prev.b + b2, n: prev.n + 1 });
+  }
+
+  if (buckets.size === 0) return null;
+
+  const sorted = Array.from(buckets.entries()).sort((a2, b2) => b2[1] - a2[1]);
+  const candidates = sorted.slice(0, Math.min(TOP_N, sorted.length));
+
+  let bestKey = candidates[0][0];
+  let bestScore = -Infinity;
+  for (const [k, count] of candidates) {
+    const sum2 = bucketSum.get(k)!;
+    const rr = sum2.r / sum2.n, gg = sum2.g / sum2.n, bb = sum2.b / sum2.n;
+    const max2 = Math.max(rr, gg, bb) / 255, min2 = Math.min(rr, gg, bb) / 255;
+    const lv2 = (max2 + min2) / 2;
+    const sat2 = max2 === min2 ? 0 : lv2 > 0.5 ? (max2 - min2) / (2 - max2 - min2) : (max2 - min2) / (max2 + min2);
+    const score = sat2 * 100 + Math.log(count + 1) * 2;
+    if (score > bestScore) {
+      bestScore = score;
+      bestKey = k;
+    }
+  }
+
+  const sum = bucketSum.get(bestKey)!;
+  const r = Math.round(sum.r / sum.n);
+  const g = Math.round(sum.g / sum.n);
+  const b = Math.round(sum.b / sum.n);
+  const max = Math.max(r, g, b) / 255, min = Math.min(r, g, b) / 255;
+  const lv = (max + min) / 2;
+  const sat = max === min ? 0 : lv > 0.5 ? (max - min) / (2 - max - min) : (max - min) / (max + min);
+
+  return { r, g, b, saturation: sat };
+}
+
+// --- Fallback determinístico a partir do nome (mesmo algoritmo do outro bot) ---
+function generateColorFromName(name: string): string {
+  let hash1 = 0, hash2 = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash1 = (hash1 << 5) - hash1 + name.charCodeAt(i);
+    hash1 |= 0;
+    hash2 = (hash2 << 3) + hash2 + name.charCodeAt(i);
+    hash2 |= 0;
+  }
+  const hue = Math.abs((hash1 + hash2) % 360);
+  const saturation = 70 + Math.abs(hash1 % 25);
+  const lightness = 48 + Math.abs(hash2 % 14);
+  const h = hue / 360, s = saturation / 100, l = lightness / 100;
+  let r: number, g: number, b: number;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const hue2rgb = (p2: number, q2: number, t: number) => {
+      if (t < 0) t += 1;
+      if (t > 1) t -= 1;
+      if (t < 1 / 6) return p2 + (q2 - p2) * 6 * t;
+      if (t < 1 / 2) return q2;
+      if (t < 2 / 3) return p2 + (q2 - p2) * (2 / 3 - t) * 6;
+      return p2;
+    };
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1 / 3);
+  }
+  const toHex = (x: number) => Math.round(x * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return m
+    ? { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) }
+    : { r: 61, g: 22, b: 112 };
+}
+
+// Decodifica os bytes brutos (PNG ou JPEG) de uma URL já baixada e tenta
+// extrair a cor dominante. Retorna null se não conseguir decodificar ou
+// não achar nenhum pixel saturado o bastante.
+async function extractColorFromBytes(url: string): Promise<string | null> {
+  const buf = rawImageBytes.get(url);
+  if (!buf) return null;
+
+  const mime = sniffMime(buf);
+  let decoded: DecodedImage | null = null;
+
+  if (mime === "image/png") {
+    decoded = await decodePNG(buf);
+  } else if (mime === "image/jpeg") {
+    decoded = decodeJPEG(buf);
+  } else {
+    console.log(`⚠️ Formato [${mime || "desconhecido"}] sem decoder de cor, pulando`);
+    return null;
+  }
+
+  if (!decoded) return null;
+
+  const best = extractDominantFromPixels(decoded.pixels);
+  if (!best) return null;
+
+  let { r, g, b, saturation } = best;
+  if (saturation < 0.35) {
+    if (r >= g && r >= b) {
+      r = Math.min(255, r + 60);
+      g = Math.max(0, g - 20);
+      b = Math.max(0, b - 20);
+    } else if (g >= r && g >= b) {
+      g = Math.min(255, g + 60);
+      r = Math.max(0, r - 20);
+      b = Math.max(0, b - 20);
+    } else {
+      b = Math.min(255, b + 60);
+      r = Math.max(0, r - 20);
+      g = Math.max(0, g - 20);
+    }
+  }
+
+  const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+  console.log(`✅ Cor extraída de ${url}: ${hex} (sat: ${(saturation * 100).toFixed(1)}%)`);
+  return hex;
+}
+
+// Banner -> foto -> nome (mesma ordem de fallback do outro bot)
+async function extractDominantColor(bannerUrl: string, pictureUrl: string, name: string): Promise<string> {
+  console.log("🎨 === ANÁLISE DE COR (pixels reais) ===");
+
+  if (bannerUrl) {
+    console.log("🔍 Analisando banner...");
+    const color = await extractColorFromBytes(bannerUrl);
+    if (color) return color;
+  }
+
+  if (pictureUrl && pictureUrl !== bannerUrl) {
+    console.log("🔍 Analisando foto...");
+    const color = await extractColorFromBytes(pictureUrl);
+    if (color) return color;
+  }
+
+  console.log("🔍 Gerando cor do nome...");
+  return generateColorFromName(name);
+}
+
+type Palette = {
+  base: string;
+  darker: string;
+  darkest: string;
+  brand: string; // gradiente CSS pronto pra usar em `background`
+  cardBg: string;
+  cardBorder: string;
+};
+
+function generatePalette(color: string): Palette {
+  const rgb = hexToRgb(color);
+  const darker = { r: Math.max(0, rgb.r - 40), g: Math.max(0, rgb.g - 30), b: Math.max(0, rgb.b - 50) };
+  const darkest = { r: Math.max(0, rgb.r - 85), g: Math.max(0, rgb.g - 70), b: Math.max(0, rgb.b - 110) };
+  // Segunda cor do gradiente: mesmo tom, deslocado pra um tom mais "frio"
+  // (leve giro pra azul) — mantém a identidade visual sem ficar um degradê
+  // genérico de duas cores aleatórias.
+  const brandEnd = { r: Math.max(0, rgb.r - 60), g: Math.max(0, rgb.g - 20), b: Math.min(255, rgb.b + 50) };
+
+  return {
+    base: `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`,
+    darker: `rgb(${darker.r}, ${darker.g}, ${darker.b})`,
+    darkest: `rgb(${darkest.r}, ${darkest.g}, ${darkest.b})`,
+    brand: `linear-gradient(90deg, rgb(${rgb.r}, ${rgb.g}, ${rgb.b}) 0%, rgb(${brandEnd.r}, ${brandEnd.g}, ${brandEnd.b}) 100%)`,
+    cardBg: `rgba(${Math.min(255, rgb.r + 20)}, ${Math.min(255, rgb.g + 20)}, ${Math.min(255, rgb.b + 20)}, 0.10)`,
+    cardBorder: `1px solid rgba(${Math.min(255, rgb.r + 40)}, ${Math.min(255, rgb.g + 40)}, ${Math.min(255, rgb.b + 40)}, 0.18)`,
+  };
+}
+
+// -----------------------------------------------------------------
 // Dados normalizados
 // -----------------------------------------------------------------
 const W = 1200;
-const BG = "#120a2e";
-const BRAND = "linear-gradient(90deg, #b433ff 0%, #284aff 100%)";
-const CARD_BG = "rgba(255,255,255,0.07)";
-const CARD_BORDER = "1px solid rgba(255,255,255,0.12)";
 
 const name = clean(a.name) || "Artista";
 const worldRank = clean(a.worldRank);
@@ -301,15 +948,28 @@ const colsH = Math.max(tracksColH, feedColH, 120);
 const H = 340 + 6 + 84 + 18 + (bio ? 49 + 18 : 0) + colsH + 40;
 
 // Imagens (banner, foto e capas) em paralelo; cada uma validada sozinha
+const bannerUrl = String(a.banner ?? "");
+const pictureUrl = String(a.picture ?? "");
+
 let [bannerB64, picB64] = await Promise.all([
-  loadImage(String(a.banner ?? ""), "banner"),
-  loadImage(String(a.picture ?? ""), "foto"),
+  loadImage(bannerUrl, "banner"),
+  loadImage(pictureUrl, "foto"),
 ]);
 await Promise.all(
   tracks.map(async (t: N, i: number) => {
     t.coverB64 = await loadImage(t.cover, `capa ${i + 1}`);
   }),
 );
+
+// Extrai a cor dominante a partir dos bytes que já baixamos pro Satori
+// (banner primeiro, depois foto, depois cor gerada a partir do nome).
+const dominantColor = await extractDominantColor(bannerUrl, pictureUrl, name);
+const palette = generatePalette(dominantColor);
+
+const BG = palette.darkest;
+const BRAND = palette.brand;
+const CARD_BG = palette.cardBg;
+const CARD_BORDER = palette.cardBorder;
 
 // -----------------------------------------------------------------
 // Layout (Satori)
@@ -327,7 +987,7 @@ function buildMarkup(): N {
     // Escurece a base do banner até a cor do fundo (sem "corte" seco)
     el({
       position: "absolute", top: "0px", left: "0px", width: `${W}px`, height: "250px",
-      background: "linear-gradient(to bottom, rgba(18,10,46,0.10) 0%, rgba(18,10,46,0.55) 55%, rgba(18,10,46,1) 100%)",
+      background: `linear-gradient(to bottom, rgba(18,10,46,0.10) 0%, rgba(18,10,46,0.55) 55%, ${BG} 100%)`,
     }),
     // Marca
     el(
@@ -356,7 +1016,7 @@ function buildMarkup(): N {
       : el(
         {
           position: "absolute", top: "150px", left: "60px", width: "170px", height: "170px", borderRadius: "85px",
-          border: "6px solid white", background: "#2b2160", alignItems: "center", justifyContent: "center",
+          border: "6px solid white", background: palette.base, alignItems: "center", justifyContent: "center",
           fontSize: "68px", fontWeight: 900,
         },
         name[0]?.toUpperCase() ?? "?",
@@ -405,7 +1065,7 @@ function buildMarkup(): N {
         borderRadius: "16px", padding: "12px 22px",
       },
       [
-        el({ width: "4px", height: "24px", borderRadius: "2px", background: "#b96bff", marginRight: "16px" }),
+        el({ width: "4px", height: "24px", borderRadius: "2px", background: palette.base, marginRight: "16px" }),
         el({ flex: 1, fontSize: "21px", whiteSpace: "nowrap", overflow: "hidden" }, bio),
       ],
     )
