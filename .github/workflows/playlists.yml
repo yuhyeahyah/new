@@ -1,14 +1,10 @@
 name: Atualizar playlists
 
 on:
-  # Horários em UTC (BRT = UTC-3).
-  #   00:15 UTC = 21:15 BRT  -> logo depois das playlists atualizarem (~21:05)
-  #   00:45 UTC = 21:45 BRT  -> segunda chance (o cron do GitHub costuma atrasar)
-  #   e a cada 3 horas pra pegar mudanças fora do horário fixo
+  # Horário em UTC (BRT = UTC-3).
+  # 00:15 UTC = 21:15 BRT -> logo depois das playlists atualizarem (~21:00)
   schedule:
     - cron: "15 0 * * *"
-    - cron: "45 0 * * *"
-    - cron: "0 3,6,9,12,15,18 * * *"
   # Botão "Run workflow" no GitHub, pra gerar o primeiro arquivo sem esperar
   workflow_dispatch:
 
