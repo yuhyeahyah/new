@@ -225,6 +225,9 @@ async function main() {
   console.log(`✅ ${OUT_FILE} gravado (criptografado): ${ok.length} playlists, ${failed.length} falharam`);
 }
 
-if (import.meta.main) {
-  await main();
+  const t0 = Date.now();
+  const enc = await encrypt(JSON.stringify(data), KEY);
+  console.log(`🔐 criptografado em ${Date.now() - t0}ms (${enc.length} bytes)`);
+  await Deno.writeTextFile(OUT_FILE, enc);
+  console.log(`✅ ${OUT_FILE} gravado: ${ok.length} playlists, ${failed.length} falharam`);
 }
