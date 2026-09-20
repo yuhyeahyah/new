@@ -536,10 +536,12 @@ function decodeJPEG(data: Uint8Array): DecodedImage | null {
   }
 }
 
-// Decodificador aproximado: extrai só o coeficiente DC (média de bloco 8x8)
-// de cada componente via Huffman, reconstrói uma imagem em baixa resolução
-// (1 pixel por bloco MCU) em YCbCr -> RGB. É suficiente para estimar a cor
-// dominante sem implementar IDCT completo.
+// Decodificador aproximado: extrai o coeficiente DC de cada bloco 8x8 via
+// Huffman e reconstrói uma imagem em baixa resolução — 1 "pixel" por bloco
+// de luminância (não uma média global única). Isso preserva a variação de
+// cor pela cena (céu vs grama vs pele, por exemplo) em vez de achatar tudo
+// numa única média cinzenta, o que é essencial para extractDominantFromPixels
+// conseguir escolher o bucket de cor mais frequente/saturado de verdade.
 function decodeJPEGApprox(
   data: Uint8Array,
   frame: { width: number; height: number; components: { id: number; h: number; v: number; qId: number }[] },
@@ -549,19 +551,19 @@ function decodeJPEGApprox(
   huffAC: Record<number, N>,
   qTables: Record<number, Int32Array>,
 ): DecodedImage | null {
-  // Remove byte stuffing (0xFF 0x00 -> 0xFF)
-  const clean: number[] = [];
+  // Remove byte stuffing (0xFF 0x00 -> 0xFF) e pula restart markers
+  const cleaned: number[] = [];
   for (let i = 0; i < scanData.length; i++) {
     if (scanData[i] === 0xff && scanData[i + 1] === 0x00) {
-      clean.push(0xff);
+      cleaned.push(0xff);
       i++;
     } else if (scanData[i] === 0xff && scanData[i + 1] >= 0xd0 && scanData[i + 1] <= 0xd7) {
-      i++; // pula restart markers
+      i++; // pula restart markers (RSTn)
     } else {
-      clean.push(scanData[i]);
+      cleaned.push(scanData[i]);
     }
   }
-  const bytes = new Uint8Array(clean);
+  const bytes = new Uint8Array(cleaned);
 
   let bitPos = 0;
   const totalBits = bytes.length * 8;
@@ -604,13 +606,25 @@ function decodeJPEGApprox(
   const dcPrev: Record<number, number> = {};
   for (const c of scanComponents) dcPrev[c.id] = 0;
 
-  // Guarda o valor DC médio de cada componente por MCU (aproxima 1 amostra
-  // de cor por bloco de 8x(hMax/h) x 8x(vMax/v) pixels).
-  const dcSamples: { id: number; value: number }[] = [];
+  const ids = frame.components.map((c) => c.id).sort((x, y) => x - y);
+  const yId = ids[0];
+  const cbId = ids[1];
+  const crId = ids[2];
+
+  // Uma amostra de cor por MCU (não por sub-bloco de croma, que costuma vir
+  // subamostrado 2x2 em 4:2:0). Cada MCU vira 1 "pixel" na imagem de saída,
+  // preservando onde na cena aquela cor aparece em vez de só uma média geral.
+  const pixels = new Uint8Array(mcusX * mcusY * 4);
+  let samplesWritten = 0;
 
   outer:
   for (let my = 0; my < mcusY; my++) {
     for (let mx = 0; mx < mcusX; mx++) {
+      // valores DC (já em unidades reais, pós quantização) coletados neste MCU
+      let yDcSum = 0, yDcCount = 0;
+      let cbDc = 0, crDc = 0;
+      let gotCb = false, gotCr = false;
+
       for (const comp of frame.components) {
         const sc = scanComponents.find((s) => s.id === comp.id);
         if (!sc) continue;
@@ -625,8 +639,21 @@ function decodeJPEGApprox(
             const diff = t === 0 ? 0 : extend(receive(t), t);
             dcPrev[comp.id] += diff;
             const q = qTables[comp.qId];
-            const dcValue = dcPrev[comp.id] * (q ? q[0] : 1);
-            dcSamples.push({ id: comp.id, value: dcValue });
+            // Coeficiente DC já escalado: dividir por 8 normaliza o bloco
+            // 8x8 (DC = soma/N, N=8 na base DCT) pra virar o nível médio
+            // real do bloco em 0-255 (antes do +128 de level shift).
+            const dcValue = (dcPrev[comp.id] * (q ? q[0] : 1)) / 8;
+
+            if (comp.id === yId) {
+              yDcSum += dcValue;
+              yDcCount++;
+            } else if (comp.id === cbId) {
+              cbDc = dcValue;
+              gotCb = true;
+            } else if (comp.id === crId) {
+              crDc = dcValue;
+              gotCr = true;
+            }
 
             // Consome (sem usar) os coeficientes AC pra manter o bitstream
             // sincronizado — não precisamos deles pra cor dominante.
@@ -649,36 +676,33 @@ function decodeJPEGApprox(
           }
         }
       }
+
+      if (yDcCount > 0) {
+        const yAvg = yDcSum / yDcCount + 128;
+        const cbAvg = gotCb ? cbDc + 128 : 128;
+        const crAvg = gotCr ? crDc + 128 : 128;
+
+        const r = clamp255(yAvg + 1.402 * (crAvg - 128));
+        const g = clamp255(yAvg - 0.344136 * (cbAvg - 128) - 0.714136 * (crAvg - 128));
+        const b = clamp255(yAvg + 1.772 * (cbAvg - 128));
+
+        const pi = (my * mcusX + mx) * 4;
+        pixels[pi] = r;
+        pixels[pi + 1] = g;
+        pixels[pi + 2] = b;
+        pixels[pi + 3] = 255;
+        samplesWritten++;
+      }
+
       if (bitPos >= totalBits) break outer;
     }
   }
 
-  if (!dcSamples.length) return null;
+  if (!samplesWritten) return null;
 
-  // Agrupa amostras por componente (assume 1=Y, 2=Cb, 3=Cr — ordem padrão
-  // JFIF) e faz a média geral de cada canal para estimar 1 cor "média"
-  // representativa da imagem inteira.
-  const byComp: Record<number, number[]> = {};
-  for (const s of dcSamples) {
-    (byComp[s.id] ||= []).push(s.value);
-  }
-  const ids = frame.components.map((c) => c.id).sort((x, y) => x - y);
-  const avg = (arr: number[] | undefined) =>
-    arr && arr.length ? arr.reduce((a2, b2) => a2 + b2, 0) / arr.length : 0;
+  console.log(`🧩 JPEG decodificado por blocos: ${mcusX}x${mcusY} amostras (${samplesWritten} válidas)`);
 
-  const yAvg = avg(byComp[ids[0]]) / 8 + 128; // DC já escalado, /8 normaliza bloco 8x8, +128 remove level shift
-  const cbAvg = ids[1] !== undefined ? avg(byComp[ids[1]]) / 8 + 128 : 128;
-  const crAvg = ids[2] !== undefined ? avg(byComp[ids[2]]) / 8 + 128 : 128;
-
-  const r = clamp255(yAvg + 1.402 * (crAvg - 128));
-  const g = clamp255(yAvg - 0.344136 * (cbAvg - 128) - 0.714136 * (crAvg - 128));
-  const b = clamp255(yAvg + 1.772 * (cbAvg - 128));
-
-  // Como essa via só produz uma cor média (não pixels reais por posição),
-  // devolvemos uma "imagem" 1x1 — extractDominantFromPixels aceita isso
-  // (ele varre pixel a pixel, então funciona igual com 1 pixel).
-  const pixels = new Uint8Array([r, g, b, 255]);
-  return { pixels, width: 1, height: 1 };
+  return { pixels, width: mcusX, height: mcusY };
 }
 
 function clamp255(v: number): number {
@@ -795,10 +819,15 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 // não achar nenhum pixel saturado o bastante.
 async function extractColorFromBytes(url: string): Promise<string | null> {
   const buf = rawImageBytes.get(url);
-  if (!buf) return null;
+  if (!buf) {
+    console.log(`⚠️ Sem bytes em cache para ${url}, não dá pra extrair cor`);
+    return null;
+  }
 
   const mime = sniffMime(buf);
   let decoded: DecodedImage | null = null;
+
+  console.log(`🔬 Decodificando [${mime || "formato desconhecido"}] ${url} (${buf.byteLength} bytes)`);
 
   if (mime === "image/png") {
     decoded = await decodePNG(buf);
@@ -809,30 +838,64 @@ async function extractColorFromBytes(url: string): Promise<string | null> {
     return null;
   }
 
-  if (!decoded) return null;
+  if (!decoded) {
+    console.log(`⚠️ Decodificação falhou para ${url}`);
+    return null;
+  }
+
+  console.log(`🖼️ Decodificado ${decoded.width}x${decoded.height} px`);
 
   const best = extractDominantFromPixels(decoded.pixels);
-  if (!best) return null;
+  if (!best) {
+    console.log(`⚠️ Nenhum pixel suficientemente saturado em ${url}`);
+    return null;
+  }
+
+  const rawHex = `#${best.r.toString(16).padStart(2, "0")}${best.g.toString(16).padStart(2, "0")}${best.b.toString(16).padStart(2, "0")}`;
+  console.log(`🎯 Bucket dominante antes do boost: ${rawHex} (sat: ${(best.saturation * 100).toFixed(1)}%)`);
+
+  // Abaixo desse piso, "qual canal é dominante" é essencialmente ruído de
+  // compressão numa imagem visualmente cinza/monocromática — não existe
+  // cor real pra extrair aqui. Em vez de forçar uma cor vibrante artificial
+  // (o boost abaixo faria isso), desiste desta imagem e deixa o chamador
+  // cair pro próximo fallback (foto de perfil, depois nome).
+  const MIN_USABLE_SAT = 0.12;
+  if (best.saturation < MIN_USABLE_SAT) {
+    console.log(
+      `🚫 Imagem praticamente sem cor (sat: ${(best.saturation * 100).toFixed(1)}% < ${MIN_USABLE_SAT * 100}%) — descartando, sem inventar cor`,
+    );
+    return null;
+  }
 
   let { r, g, b, saturation } = best;
   if (saturation < 0.35) {
+    // Boost proporcional: quanto mais perto de 0% de saturação, mais fraco
+    // o empurrão — uma imagem quase cinza (ruído de compressão decidindo
+    // o canal "dominante") não deve virar uma cor vibrante artificial.
+    // Em saturation=0 o boost é ~25% do valor máximo; em saturation=0.34
+    // (quase no limiar) o boost é quase o valor máximo (60/20).
+    const strength = 1 - saturation / 0.35; // 1 (bem dessaturado) -> 0 (no limiar)
+    const boost = Math.round(25 + strength * 35); // 25..60
+    const cut = Math.round(8 + strength * 12); // 8..20
+
     if (r >= g && r >= b) {
-      r = Math.min(255, r + 60);
-      g = Math.max(0, g - 20);
-      b = Math.max(0, b - 20);
+      r = Math.min(255, r + boost);
+      g = Math.max(0, g - cut);
+      b = Math.max(0, b - cut);
     } else if (g >= r && g >= b) {
-      g = Math.min(255, g + 60);
-      r = Math.max(0, r - 20);
-      b = Math.max(0, b - 20);
+      g = Math.min(255, g + boost);
+      r = Math.max(0, r - cut);
+      b = Math.max(0, b - cut);
     } else {
-      b = Math.min(255, b + 60);
-      r = Math.max(0, r - 20);
-      g = Math.max(0, g - 20);
+      b = Math.min(255, b + boost);
+      r = Math.max(0, r - cut);
+      g = Math.max(0, g - cut);
     }
+    console.log(`📈 Saturação baixa (${(saturation * 100).toFixed(1)}%) — boost proporcional aplicado (+${boost}/-${cut})`);
   }
 
   const hex = `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
-  console.log(`✅ Cor extraída de ${url}: ${hex} (sat: ${(saturation * 100).toFixed(1)}%)`);
+  console.log(`✅ Cor final extraída de ${url}: ${hex}`);
   return hex;
 }
 
@@ -843,17 +906,25 @@ async function extractDominantColor(bannerUrl: string, pictureUrl: string, name:
   if (bannerUrl) {
     console.log("🔍 Analisando banner...");
     const color = await extractColorFromBytes(bannerUrl);
-    if (color) return color;
+    if (color) {
+      console.log(`🏁 Cor final escolhida (fonte: banner): ${color}`);
+      return color;
+    }
   }
 
   if (pictureUrl && pictureUrl !== bannerUrl) {
-    console.log("🔍 Analisando foto...");
+    console.log("🔍 Banner sem cor usável, analisando foto...");
     const color = await extractColorFromBytes(pictureUrl);
-    if (color) return color;
+    if (color) {
+      console.log(`🏁 Cor final escolhida (fonte: foto de perfil): ${color}`);
+      return color;
+    }
   }
 
-  console.log("🔍 Gerando cor do nome...");
-  return generateColorFromName(name);
+  console.log("🔍 Nenhuma imagem deu cor usável, gerando cor a partir do nome...");
+  const fallback = generateColorFromName(name);
+  console.log(`🏁 Cor final escolhida (fonte: nome "${name}"): ${fallback}`);
+  return fallback;
 }
 
 type Palette = {
