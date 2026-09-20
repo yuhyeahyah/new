@@ -111,7 +111,9 @@ const [bannerB64, picB64] = await Promise.all([
 
 const name = String(a.name ?? "Artista");
 const meta = [a.genre, a.nationality, a.label].filter(Boolean).join(" • ");
-const bio = String(a.bio ?? "Sem bio.").slice(0, 170);
+const BIO_MAX = 50;
+const bioRaw = String(a.bio ?? "").trim();
+const bio = bioRaw.length > BIO_MAX ? bioRaw.slice(0, BIO_MAX - 1).trimEnd() + "…" : bioRaw;
 const tracks = (a.tracks ?? []).slice(0, 3);
 
 const markup = {
