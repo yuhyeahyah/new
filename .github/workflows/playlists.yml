@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # necessário pro commit do playlists.json
+  contents: write # necessário pro commit do playlists.enc
 
 concurrency:
   group: playlists
@@ -31,16 +31,19 @@ jobs:
       - name: Raspar playlists
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
-        run: deno run --allow-net --allow-write --allow-env=SITE_URL scrape-playlists.ts
+          PLAYLISTS_KEY: ${{ secrets.PLAYLISTS_KEY }}
+        run: deno run --allow-net --allow-write --allow-env=SITE_URL,PLAYLISTS_KEY scrape-playlists.ts
 
       - name: Commitar se mudou
         run: |
           git config user.name "playlists-bot"
           git config user.email "playlists-bot@users.noreply.github.com"
+          # Remove o playlists.json antigo (texto puro) do repositório, se ainda existir.
+          git rm -q -f --ignore-unmatch playlists.json
           # add ANTES de comparar: "git diff" sozinho ignora arquivo novo (untracked),
           # e por isso a 1ª rodada dizia "sem mudanças" sem nunca criar o arquivo.
-          git add playlists.json
-          if git diff --cached --quiet -- playlists.json; then
+          git add playlists.enc
+          if git diff --cached --quiet -- playlists.enc playlists.json; then
             echo "Sem mudanças, nada a commitar"
             exit 0
           fi
