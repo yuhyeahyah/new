@@ -945,14 +945,22 @@ type Palette = {
 function generatePalette(color: string): Palette {
   const rgb = hexToRgb(color);
 
-  // Escurecimento PROPORCIONAL (multiplicativo), não subtrativo por valor
-  // fixo. Subtrair um valor absoluto grande do canal B (por exemplo) some
-  // desproporcionalmente mais de canais que já são baixos, distorcendo o
-  // matiz original — foi isso que fazia um amarelo puro (#efdf87) virar
-  // visualmente oliva/mostarda depois de escurecido. Multiplicar por um
-  // fator preserva a proporção entre R/G/B e portanto o matiz.
-  const scaleDarker = 0.72; // ~28% mais escuro, mantendo o tom
-  const scaleDarkest = 0.5; // ~50% mais escuro — ainda reconhecível como o mesmo tom
+  // Brilho percebido (0..1) da cor original. Cores claras/pastel (ex.:
+  // #efdf87, brilho ~0.86) precisam escurecer bem pouco para não perder a
+  // identidade — um amarelo pastel escurecido demais deixa de "ler" como
+  // amarelo. Cores já médias/escuras (ex.: um verde-oliva, brilho ~0.45)
+  // têm margem pra escurecer mais sem sumir, então mantemos o comportamento
+  // que já funcionou bem nesse caso.
+  const luminance = (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+
+  // Interpola o fator de escala: quanto mais clara a cor original, mais
+  // perto de 1.0 (quase sem escurecer); quanto mais escura, mais perto do
+  // fator "cheio" de escurecimento.
+  const FULL_DARKER = 0.72;
+  const FULL_DARKEST = 0.5;
+  const scaleDarker = FULL_DARKER + (1 - FULL_DARKER) * luminance;
+  const scaleDarkest = FULL_DARKEST + (1 - FULL_DARKEST) * luminance;
+
   const darker = {
     r: Math.round(rgb.r * scaleDarker),
     g: Math.round(rgb.g * scaleDarker),
