@@ -39,13 +39,15 @@ jobs:
 
       - name: Commitar se mudou
         run: |
-          if git diff --quiet -- playlists.json; then
+          git config user.name "playlists-bot"
+          git config user.email "playlists-bot@users.noreply.github.com"
+          # add ANTES de comparar: "git diff" sozinho ignora arquivo novo (untracked),
+          # e por isso a 1ª rodada dizia "sem mudanças" sem nunca criar o arquivo.
+          git add playlists.json
+          if git diff --cached --quiet -- playlists.json; then
             echo "Sem mudanças, nada a commitar"
             exit 0
           fi
-          git config user.name "playlists-bot"
-          git config user.email "playlists-bot@users.noreply.github.com"
-          git add playlists.json
           git commit -m "playlists: atualiza $(date -u +'%Y-%m-%d %H:%M') UTC"
           git pull --rebase origin ${{ github.ref_name }}
           git push
