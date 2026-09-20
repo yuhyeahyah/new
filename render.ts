@@ -188,17 +188,19 @@ const markup = {
           ],
         },
       },
-      {
-        type: "div",
-        props: {
-          style: {
-            position: "absolute", top: "450px", left: "60px", width: "640px", display: "flex",
-            background: "rgba(0,0,0,0.28)", borderRadius: "16px", padding: "18px 24px",
-            fontSize: "20px", fontStyle: "italic", lineHeight: 1.4,
-          },
-          children: bio,
-        },
-      },
+            bio && bio.trim()
+        ? {
+            type: "div",
+            props: {
+              style: {
+                position: "absolute", top: "450px", left: "60px", width: "640px", display: "flex",
+                background: "rgba(0,0,0,0.28)", borderRadius: "16px", padding: "18px 24px",
+                fontSize: "20px", fontStyle: "italic", lineHeight: 1.4,
+              },
+              children: bio,
+            },
+          }
+        : null,
       {
         type: "div",
         props: {
