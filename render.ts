@@ -122,7 +122,12 @@ function wrapLines(text: string, maxChars: number, maxLines: number): string[] {
 // -----------------------------------------------------------------
 function el(style: Record<string, unknown>, children?: N): N {
   const kids = Array.isArray(children) ? children.filter(Boolean) : children;
-  return { type: "div", props: { style: { display: "flex", ...style }, children: kids } };
+  // O Satori quebra ("reading 'trim'") se algum valor de estilo for undefined/null
+  const st: Record<string, unknown> = { display: "flex" };
+  for (const [k, v] of Object.entries(style)) {
+    if (v !== undefined && v !== null) st[k] = v;
+  }
+  return { type: "div", props: { style: st, children: kids } };
 }
 
 function img(src: string, w: number, h: number, style: Record<string, unknown> = {}): N {
@@ -1237,10 +1242,12 @@ function buildClassic(): N {
     : null;
 
   const sideCol = hasSide
-    ? el({ width: tracks.length ? "400px" : undefined, flex: tracks.length ? undefined : 1, flexDirection: "column", gap: "20px" }, [
-      featuredCard,
-      feedCard,
-    ])
+    ? el(
+      tracks.length
+        ? { width: "400px", flexDirection: "column", gap: "20px" }
+        : { flex: 1, flexDirection: "column", gap: "20px" },
+      [featuredCard, feedCard],
+    )
     : null;
 
   const columns = tracksCard || sideCol ? el({ flexDirection: "row", gap: "20px" }, [tracksCard, sideCol]) : null;
