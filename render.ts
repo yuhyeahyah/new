@@ -1134,15 +1134,15 @@ function statBoxes(
 
 // ═════════════════════════════════════════════════════════════════
 // LAYOUT: CLASSIC (1200)
-// Faixas à esquerda; destaque + feed numa coluna à direita.
-// Sem destaque e sem feed -> faixas ocupam a largura toda.
+// Destaque = faixa larga logo abaixo da bio.
+// Faixas à esquerda + feed à direita; sem feed -> faixas na largura toda.
 // ═════════════════════════════════════════════════════════════════
 function buildClassic(): N {
   const BG = palette.darkest;
   const CARD_BG = palette.cardBg;
   const CARD_BORDER = palette.cardBorder;
-  const hasSide = !!featured || feedAll.length > 0;
-  const bio = clip(bioFull, hasSide ? 95 : 95);
+  const hasFeed = feedAll.length > 0;
+  const bio = clip(bioFull, 95);
 
   const header = el({ position: "relative", width: `${W}px`, height: "340px" }, [
     el(
@@ -1189,7 +1189,7 @@ function buildClassic(): N {
     : null;
 
   const anyCover = tracks.some((t: N) => t.coverB64);
-  const titleMax = hasSide ? 26 : 46;
+  const titleMax = hasFeed ? 26 : 46;
 
   const trackRow = (t: N, i: number) =>
     el({ flexDirection: "row", alignItems: "center", height: "56px", marginTop: i ? "8px" : "0px" }, [
@@ -1209,22 +1209,47 @@ function buildClassic(): N {
     )
     : null;
 
-  const featuredCard = featured
+  // Se o destaque também está nas faixas populares, mostra posição e streams
+  const featTrack = featured
+    ? tracks.find((t: N) => t.title.toLowerCase() === featured.title.toLowerCase())
+    : null;
+
+  const featuredBanner = featured
     ? el(
-      { flexDirection: "row", alignItems: "center", background: CARD_BG, border: CARD_BORDER, borderRadius: "20px", padding: "18px 20px" },
+      { flexDirection: "row", background: CARD_BG, border: CARD_BORDER, borderRadius: "20px", overflow: "hidden" },
       [
-        coverBox(featured.coverB64, 84, 12, featured.title, { marginRight: "18px" }),
-        el({ flex: 1, flexDirection: "column", overflow: "hidden" }, [
-          el({ fontSize: "12px", fontWeight: 700, letterSpacing: "2px", color: textRgba(0.65) }, "DESTAQUE"),
-          el({ fontSize: "24px", fontWeight: 900, marginTop: "4px", whiteSpace: "nowrap" }, clip(featured.title, 22)),
-          typeTag(featured.type, textRgba(0.14)),
-        ]),
+        el({ width: "6px", background: palette.base }),
+        el(
+          {
+            flex: 1, flexDirection: "row", alignItems: "center", padding: "18px 26px 18px 20px",
+            background: "linear-gradient(90deg, rgba(255,255,255,0.12) 0%, rgba(255,255,255,0) 70%)",
+          },
+          [
+            coverBox(featured.coverB64, 104, 14, featured.title, { marginRight: "22px", border: "3px solid rgba(255,255,255,0.85)" }),
+            el({ flex: 1, flexDirection: "column", overflow: "hidden" }, [
+              el({ fontSize: "12px", fontWeight: 700, letterSpacing: "3px", color: textRgba(0.7) }, "DESTAQUE DO ARTISTA"),
+              el({ fontSize: "36px", fontWeight: 900, marginTop: "2px", whiteSpace: "nowrap" }, clip(featured.title, 34)),
+              el({ flexDirection: "row", alignItems: "center" }, [
+                typeTag(featured.type, "rgba(0,0,0,0.35)"),
+                featTrack
+                  ? el({ fontSize: "14px", fontWeight: 700, color: textRgba(0.75), marginTop: "8px", marginLeft: featured.type ? "12px" : "0px" },
+                    `#${featTrack.pos} nas faixas populares`)
+                  : null,
+              ]),
+            ]),
+            featTrack && featTrack.streams
+              ? el({ flexDirection: "column", alignItems: "flex-end", marginLeft: "20px" }, [
+                el({ fontSize: "12px", fontWeight: 700, letterSpacing: "2px", color: textRgba(0.6) }, "STREAMS"),
+                el({ fontSize: "30px", fontWeight: 900, marginTop: "2px" }, featTrack.streams),
+              ])
+              : null,
+          ],
+        ),
       ],
     )
     : null;
 
-  const maxPosts = featured ? 2 : 3;
-  const posts = feedAll.slice(0, maxPosts);
+  const posts = feedAll.slice(0, 3);
   const feedCard = posts.length
     ? el(
       { flex: 1, flexDirection: "column", background: CARD_BG, border: CARD_BORDER, borderRadius: "20px", padding: "20px 22px", overflow: "hidden" },
@@ -1241,22 +1266,18 @@ function buildClassic(): N {
     )
     : null;
 
-  const sideCol = hasSide
-    ? el(
-      tracks.length
-        ? { width: "400px", flexDirection: "column", gap: "20px" }
-        : { flex: 1, flexDirection: "column", gap: "20px" },
-      [featuredCard, feedCard],
-    )
+  // Coluna do feed só existe se houver feed; sem faixas, o feed ocupa tudo
+  const feedCol = feedCard
+    ? el(tracks.length ? { width: "400px", flexDirection: "column" } : { flex: 1, flexDirection: "column" }, [feedCard])
     : null;
 
-  const columns = tracksCard || sideCol ? el({ flexDirection: "row", gap: "20px" }, [tracksCard, sideCol]) : null;
+  const columns = tracksCard || feedCol ? el({ flexDirection: "row", gap: "20px" }, [tracksCard, feedCol]) : null;
 
   return el(
     { width: `${W}px`, background: BG, color: "white", fontFamily: "Inter", flexDirection: "column" },
     [
       header,
-      el({ flexDirection: "column", padding: "6px 60px 40px 60px", gap: "18px" }, [statsRow, bioBar, columns]),
+      el({ flexDirection: "column", padding: "6px 60px 40px 60px", gap: "18px" }, [statsRow, bioBar, featuredBanner, columns]),
     ],
   );
 }
