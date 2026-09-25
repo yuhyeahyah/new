@@ -1367,7 +1367,7 @@ function buildMidnight(): N {
       [
         el({ width: "4px", background: ACCENT }),
         el({ flex: 1, flexDirection: "column", padding: "14px 18px" }, [
-          ...wrapLines(f.text, 46, 3).map((l) => el({ fontSize: "17px", lineHeight: 1.35, color: "white", whiteSpace: "nowrap" }, l)),
+          ...wrapLines(f.text, 55, 3).map((l) => el({ fontSize: "17px", lineHeight: 1.35, color: "white", whiteSpace: "nowrap" }, l)),
           feedMeta(f, 13, 0.5),
         ]),
       ],
@@ -1489,7 +1489,7 @@ function buildSocial(): N {
             avatar(28, "none", { marginRight: "10px" }),
             el({ fontSize: "15px", fontWeight: 700, color: "white" }, clip(name, 30)),
           ]),
-          ...wrapLines(f.text, 78, 3).map((l) => el({ fontSize: "18px", lineHeight: 1.35, color: "white", whiteSpace: "nowrap" }, l)),
+          ...wrapLines(f.text, 90, 3).map((l) => el({ fontSize: "18px", lineHeight: 1.35, color: "white", whiteSpace: "nowrap" }, l)),
           feedMeta(f),
         ])
       ),
