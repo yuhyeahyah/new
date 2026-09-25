@@ -1,11 +1,11 @@
 name: Atualizar playlists
 
 on:
-  # Horário em UTC (BRT = UTC-3).
-  # 00:15 UTC = 21:15 BRT -> logo depois das playlists atualizarem (~21:00)
-  schedule:
-    - cron: "15 0 * * *"
-  # Botão "Run workflow" no GitHub, pra gerar o primeiro arquivo sem esperar
+  # Quem dispara é o Worker do Cloudflare (Gatilho cron "15 0 * * *"):
+  # 00:15 UTC = 21:15 de Brasília, logo depois das playlists atualizarem (~21:00).
+  # O "schedule" do GitHub foi removido porque ele atrasa ou pula execuções.
+  #
+  # Também dá pra rodar na mão pelo botão "Run workflow" no GitHub.
   workflow_dispatch:
 
 permissions:
@@ -40,8 +40,7 @@ jobs:
           git config user.email "playlists-bot@users.noreply.github.com"
           # Remove o playlists.json antigo (texto puro) do repositório, se ainda existir.
           git rm -q -f --ignore-unmatch playlists.json
-          # add ANTES de comparar: "git diff" sozinho ignora arquivo novo (untracked),
-          # e por isso a 1ª rodada dizia "sem mudanças" sem nunca criar o arquivo.
+          # add ANTES de comparar: "git diff" sozinho ignora arquivo novo (untracked)
           git add playlists.enc
           if git diff --cached --quiet -- playlists.enc playlists.json; then
             echo "Sem mudanças, nada a commitar"
